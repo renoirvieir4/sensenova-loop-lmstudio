@@ -1,0 +1,23 @@
+[
+  {
+    "prompt": 0,
+    "reference_top1": 24,
+    "cpu_top1": 24,
+    "KL": 6.320701942413844e-06,
+    "finite": true
+  },
+  {
+    "prompt": 1,
+    "reference_top1": 57590,
+    "cpu_top1": 57590,
+    "KL": 6.405489987100981e-05,
+    "finite": true
+  },
+  {
+    "prompt": 2,
+    "reference_top1": 727,
+    "cpu_top1": 727,
+    "KL": 0.0008727169699660598,
+    "finite": true
+  }
+]

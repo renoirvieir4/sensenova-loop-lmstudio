@@ -1,0 +1,30 @@
+{
+  "checked_at": "2026-10-30T22:49:33.730081+00:00",
+  "python_syntax": "passed",
+  "shell_syntax": "passed",
+  "lmstudio_patches_apply_to_pinned_base": true,
+  "patched_files_compared_to_working_source": 22,
+  "source_differences_from_working_build": [],
+  "staging_script": "passed using stock runtime 2.66.0 and existing built library",
+  "changed_stock_files": [
+    "libllama.so",
+    "backend-manifest.json",
+    "display-data.json"
+  ],
+  "preserved_other_stock_files": true,
+  "staging_build": {
+    "base_revision": "ff0d396e3dda0f33e7ce5ad4267fce4f7690cfb1",
+    "stock_runtime": "2.66.0",
+    "custom_runtime": "2.66.101",
+    "libllama_sha256": "3ec91484e906cb0c795fb18511eed19e4ea71802336c95402e0a3a0848865d6c",
+    "exported_llama_symbols_checked": 254,
+    "note": "Symbol presence is a compatibility check, not proof of ABI compatibility."
+  },
+  "downloaded_model_size_and_sha256": "verified locally against pinned values",
+  "api_smoke_test": {
+    "model_identifier": "sensenova-loop-9b-preview@q8_0",
+    "response": "91",
+    "endpoint": "local LM Studio OpenAI-compatible endpoint"
+  },
+  "scope": "Checked the scripts and staged the existing working build. Did not install the staged copy or perform a new full CUDA build. The API check used the already-running custom runtime."
+}

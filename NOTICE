@@ -1,0 +1,31 @@
+SenseNova Loop 9B LM Studio recipe
+
+Original model, architecture, weights and reference implementation:
+SenseNova / OpenSenseNova
+https://huggingface.co/sensenova/SenseNova-Loop-9B-Preview
+https://github.com/OpenSenseNova/SenseNova-Loop
+Model revision: 27abea779b1e6634b136805b6519371739d551f7
+License: Apache-2.0
+
+llama.cpp and GGUF infrastructure:
+Copyright (c) 2023-2026 The ggml authors
+https://github.com/ggml-org/llama.cpp
+Original MIT license retained in licenses/llama.cpp-MIT.txt.
+
+Clover prerequisite patch:
+Maphist0 and contributors, llama.cpp PR #31306
+https://github.com/ggml-org/llama.cpp/pull/31306
+Revision: 4838ffb0c8ade92f34d9157deea38d92758ab824
+Existing MIT licensing retained. Included to reproduce the working runtime.
+
+Modifications by notfakerv / renoirvieir4, 2026-10-30, with OpenAI Codex assistance:
+text-only GGUF conversion and Q8_0 quantization; loop expansion and native
+two-stream mHC routing; LM Studio integration; upstream adaptation and
+regression fixes; build/download/staging/API scripts and documentation.
+New adaptation code, scripts and documentation: Apache-2.0.
+Unchanged upstream code retains its original license.
+
+LM Studio is a separate product and retains its own licensing.
+No model weights or LM Studio vendor binaries are distributed here.
+This repository is unofficial and does not imply endorsement by the
+original model authors, ggml authors, Clover contributors, or LM Studio.

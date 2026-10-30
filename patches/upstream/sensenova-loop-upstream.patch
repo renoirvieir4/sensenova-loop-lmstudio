@@ -1,0 +1,648 @@
+diff --git a/conversion/__init__.py b/conversion/__init__.py
+index 3976e03..a7ad85e 100644
+--- a/conversion/__init__.py
++++ b/conversion/__init__.py
+@@ -17,6 +17,7 @@ __all__ = [
+ 
+ 
+ TEXT_MODEL_MAP: dict[str, str] = {
++    "SenseNovaLoopForConditionalGeneration": "sensenova_loop",
+     "NEOChatModel": "sensenova_u1",
+     "AfmoeForCausalLM": "afmoe",
+     "LagunaForCausalLM": "laguna",
+diff --git a/conversion/sensenova_loop.py b/conversion/sensenova_loop.py
+new file mode 100644
+index 0000000..a4c3afc
+--- /dev/null
++++ b/conversion/sensenova_loop.py
+@@ -0,0 +1,60 @@
++from __future__ import annotations
++
++import copy
++import re
++from typing import Iterable
++
++from torch import Tensor
++
++from .base import ModelBase, gguf
++from .qwen import Qwen3_5TextModel
++
++
++@ModelBase.register("SenseNovaLoopForConditionalGeneration")
++@ModelBase.example("sensenova/SenseNova-Loop-9B-Preview")
++class SenseNovaLoopModel(Qwen3_5TextModel):
++    model_arch = gguf.MODEL_ARCH.SENSENOVA_LOOP
++    no_mtp = True
++
++    def __init__(self, dir_model, *args, **kwargs):
++        hp = copy.deepcopy(kwargs.pop("hparams", None) or ModelBase.load_hparams(dir_model, False))
++        loop, mhc = hp["loop_settings"], hp["mhc"]
++        self.loop = loop
++        self.mhc = mhc
++        self.physical_count = hp["text_config"]["num_hidden_layers"]
++        start, end, count = loop["start"], loop["end"], loop["eval_count"]
++        if loop["counts"] != [count] or count < 1 or not 0 <= start < end <= self.physical_count:
++            raise ValueError("Unsupported loop schedule")
++        if mhc["start"] != start or mhc["end"] != end or mhc["streams"] != 2 or mhc["fixed_identity"] or mhc.get("pre_scale", 1.0) != 1.0:
++            raise ValueError("Only two-stream mHC covering the repeated block is supported")
++        self.plan = list(range(start)) + list(range(start, end)) * count + list(range(end, self.physical_count))
++        hp["text_config"]["layer_types"] = [hp["text_config"]["layer_types"][i] for i in self.plan]
++        hp["text_config"]["num_hidden_layers"] = len(self.plan)
++        hp["text_config"]["mtp_num_hidden_layers"] = 0
++        super().__init__(dir_model, *args, hparams=hp, **kwargs)
++
++    def set_gguf_parameters(self) -> None:
++        super().set_gguf_parameters()
++        for name, value in [("loop_start", self.loop["start"]), ("loop_end", self.loop["end"]),
++                            ("loop_count", self.loop["eval_count"]), ("physical_layer_count", self.physical_count),
++                            ("mhc_streams", 2), ("mhc_iterations", self.mhc["iterations"])]:
++            self.gguf_writer.add_uint32(getattr(gguf.Keys.LLM, name.upper()).format(arch=self.gguf_writer.arch), value)
++
++    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
++        name = name.replace(".mhc_attn.bias", ".mhc_attn_base.bias")
++        name = name.replace(".mhc_ffn.bias", ".mhc_ffn_base.bias")
++        pairs = super().modify_tensors(data_torch, name, bid)
++        for mapped, tensor in pairs:
++            match = re.match(r"blk\.(\d+)\.(.*)", mapped)
++            if not match:
++                yield mapped, tensor
++                continue
++            physical = int(match.group(1))
++            for virtual, original in enumerate(self.plan):
++                if original == physical:
++                    yield f"blk.{virtual}.{match.group(2)}", tensor
++
++    def tensor_force_quant(self, name: str, new_name: str, bid: int | None, n_dims: int) -> gguf.GGMLQuantizationType | bool:
++        if ".hc_attn_" in new_name or ".hc_ffn_" in new_name or new_name.endswith(".ssm_conv1d.weight"):
++            return gguf.GGMLQuantizationType.F32
++        return super().tensor_force_quant(name, new_name, bid, n_dims)
+diff --git a/gguf-py/gguf/constants.py b/gguf-py/gguf/constants.py
+index 1d67dc8..668afc1 100644
+--- a/gguf-py/gguf/constants.py
++++ b/gguf-py/gguf/constants.py
+@@ -153,6 +153,12 @@ class Keys:
+         TOKEN_SHIFT_COUNT                 = "{arch}.token_shift_count"
+         INTERLEAVE_MOE_LAYER_STEP         = "{arch}.interleave_moe_layer_step"
+         FULL_ATTENTION_INTERVAL           = "{arch}.full_attention_interval"
++        LOOP_START                         = "{arch}.loop_start"
++        LOOP_END                           = "{arch}.loop_end"
++        LOOP_COUNT                         = "{arch}.loop_count"
++        PHYSICAL_LAYER_COUNT               = "{arch}.physical_layer_count"
++        MHC_STREAMS                        = "{arch}.mhc_streams"
++        MHC_ITERATIONS                     = "{arch}.mhc_iterations"
+         NUM_LOOPS                         = "{arch}.num_loops"
+         SKIP_LOOP_FINAL_NORM              = "{arch}.skip_loop_final_norm"
+         HASH_LAYER_COUNT                  = "{arch}.hash_layer_count"
+@@ -611,6 +617,7 @@ class MODEL_ARCH(IntEnum):
+     BEAM             = auto()
+     QWEN3VL          = auto()
+     QWEN3VLMOE       = auto()
++    SENSENOVA_LOOP   = auto()
+     QWEN35           = auto()
+     QWEN35MOE        = auto()
+     CLEF             = auto()
+@@ -1469,6 +1476,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
+     MODEL_ARCH.BEAM:             "beam",
+     MODEL_ARCH.QWEN3VL:          "qwen3vl",
+     MODEL_ARCH.QWEN3VLMOE:       "qwen3vlmoe",
++    MODEL_ARCH.SENSENOVA_LOOP:   "sensenova_loop",
+     MODEL_ARCH.QWEN35:           "qwen35",
+     MODEL_ARCH.QWEN35MOE:        "qwen35moe",
+     MODEL_ARCH.CLEF:             "clef",
+@@ -6381,6 +6389,10 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
+     ],
+ }
+ 
++MODEL_TENSORS[MODEL_ARCH.SENSENOVA_LOOP] = MODEL_TENSORS[MODEL_ARCH.QWEN35] + [
++    MODEL_TENSOR.HC_ATTN_FN, MODEL_TENSOR.HC_ATTN_BASE, MODEL_TENSOR.HC_FFN_FN, MODEL_TENSOR.HC_FFN_BASE,
++]
++
+ # tensors that will not be serialized
+ MODEL_TENSOR_SKIP: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
+     MODEL_ARCH.LLAMA: [
+diff --git a/gguf-py/gguf/tensor_mapping.py b/gguf-py/gguf/tensor_mapping.py
+index d06dc4e..20d7a73 100644
+--- a/gguf-py/gguf/tensor_mapping.py
++++ b/gguf-py/gguf/tensor_mapping.py
+@@ -1530,11 +1530,15 @@ class TensorNameMap:
+         ),
+ 
+         MODEL_TENSOR.HC_ATTN_FN: (
++            "model.layers.{bid}.mhc_attn", # sensenova-loop
++            "model.language_model.layers.{bid}.mhc_attn", # sensenova-loop
+             "model.layers.{bid}.hc_attn_layer.hc_pre.hc_fn", # hy-v4
+             "model.layers.{bid}.hc_attn_fn",                 # glm5-next
+         ),
+ 
+         MODEL_TENSOR.HC_ATTN_BASE: (
++            "model.layers.{bid}.mhc_attn_base", # sensenova-loop
++            "model.language_model.layers.{bid}.mhc_attn_base", # sensenova-loop
+             "model.layers.{bid}.hc_attn_layer.hc_pre.hc_base", # hy-v4
+             "model.layers.{bid}.hc_attn_base",                 # glm5-next
+         ),
+@@ -1545,11 +1549,15 @@ class TensorNameMap:
+         ),
+ 
+         MODEL_TENSOR.HC_FFN_FN: (
++            "model.layers.{bid}.mhc_ffn", # sensenova-loop
++            "model.language_model.layers.{bid}.mhc_ffn", # sensenova-loop
+             "model.layers.{bid}.hc_mlp_layer.hc_pre.hc_fn", # hy-v4
+             "model.layers.{bid}.hc_ffn_fn",                 # glm5-next
+         ),
+ 
+         MODEL_TENSOR.HC_FFN_BASE: (
++            "model.layers.{bid}.mhc_ffn_base", # sensenova-loop
++            "model.language_model.layers.{bid}.mhc_ffn_base", # sensenova-loop
+             "model.layers.{bid}.hc_mlp_layer.hc_pre.hc_base", # hy-v4
+             "model.layers.{bid}.hc_ffn_base",                 # glm5-next
+         ),
+diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
+index 8a0d6b1..e5dffb5 100644
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -41,6 +41,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
+     { LLM_ARCH_QWEN3NEXT,        "qwen3next"        },
+     { LLM_ARCH_QWEN3VL,          "qwen3vl"          },
+     { LLM_ARCH_QWEN3VLMOE,       "qwen3vlmoe"       },
++    { LLM_ARCH_SENSENOVA_LOOP,   "sensenova_loop"   },
+     { LLM_ARCH_QWEN35,           "qwen35"           },
+     { LLM_ARCH_QWEN35MOE,        "qwen35moe"        },
+     { LLM_ARCH_CLEF,             "clef"             },
+@@ -265,6 +266,12 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+     { LLM_KV_TOKEN_SHIFT_COUNT,                 "%s.token_shift_count"                 },
+     { LLM_KV_INTERLEAVE_MOE_LAYER_STEP,         "%s.interleave_moe_layer_step"         },
+     { LLM_KV_FULL_ATTENTION_INTERVAL,           "%s.full_attention_interval"           },
++    { LLM_KV_LOOP_START,                        "%s.loop_start"                        },
++    { LLM_KV_LOOP_END,                          "%s.loop_end"                          },
++    { LLM_KV_LOOP_COUNT,                        "%s.loop_count"                        },
++    { LLM_KV_PHYSICAL_LAYER_COUNT,              "%s.physical_layer_count"              },
++    { LLM_KV_MHC_STREAMS,                       "%s.mhc_streams"                       },
++    { LLM_KV_MHC_ITERATIONS,                    "%s.mhc_iterations"                    },
+     { LLM_KV_NUM_LOOPS,                         "%s.num_loops"                         },
+     { LLM_KV_SKIP_LOOP_FINAL_NORM,              "%s.skip_loop_final_norm"              },
+     { LLM_KV_HRM_LAYERS_PER_STACK,              "%s.hrm.layers_per_stack"              },
+@@ -1290,6 +1297,7 @@ bool llm_arch_is_hybrid(const llm_arch & arch) {
+         case LLM_ARCH_BAILINGMOE3:
+         case LLM_ARCH_KIMI_K3:
+         case LLM_ARCH_GLM5_NEXT:
++        case LLM_ARCH_SENSENOVA_LOOP:
+         case LLM_ARCH_QWEN35:
+         case LLM_ARCH_QWEN35MOE:
+         case LLM_ARCH_QWEN4EXP:
+@@ -1317,6 +1325,7 @@ bool llm_arch_is_diffusion(const llm_arch & arch) {
+ bool llm_arch_supports_rs_rollback(const llm_arch & arch) {
+     switch (arch) {
+         case LLM_ARCH_KIMI_K3:
++        case LLM_ARCH_SENSENOVA_LOOP:
+         case LLM_ARCH_QWEN35:
+         case LLM_ARCH_QWEN35MOE:
+         case LLM_ARCH_QWEN4EXP:
+diff --git a/src/llama-arch.h b/src/llama-arch.h
+index 072d3bc..1379fd9 100644
+--- a/src/llama-arch.h
++++ b/src/llama-arch.h
+@@ -178,6 +178,7 @@ enum llm_arch {
+     LLM_ARCH_BEAM,
+     LLM_ARCH_KOLIBRI1,
+     LLM_ARCH_LIMITE,
++    LLM_ARCH_SENSENOVA_LOOP,
+     LLM_ARCH_UNKNOWN,
+ };
+ 
+@@ -269,6 +270,12 @@ enum llm_kv {
+     LLM_KV_TOKEN_SHIFT_COUNT,
+     LLM_KV_INTERLEAVE_MOE_LAYER_STEP,
+     LLM_KV_FULL_ATTENTION_INTERVAL,
++    LLM_KV_LOOP_START,
++    LLM_KV_LOOP_END,
++    LLM_KV_LOOP_COUNT,
++    LLM_KV_PHYSICAL_LAYER_COUNT,
++    LLM_KV_MHC_STREAMS,
++    LLM_KV_MHC_ITERATIONS,
+     LLM_KV_NUM_LOOPS,
+     LLM_KV_SKIP_LOOP_FINAL_NORM,
+     LLM_KV_HRM_LAYERS_PER_STACK,
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 4141e3c..612c7d8 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -2537,6 +2537,7 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
+     } else if (model.arch == LLM_ARCH_QWEN3NEXT ||
+         model.arch == LLM_ARCH_KIMI_LINEAR ||
+         model.arch == LLM_ARCH_BAILINGMOE3 ||
++        model.arch == LLM_ARCH_SENSENOVA_LOOP ||
+         model.arch == LLM_ARCH_QWEN35 ||
+         model.arch == LLM_ARCH_QWEN35MOE ||
+         model.arch == LLM_ARCH_CLEF ||
+diff --git a/src/llama-hparams.h b/src/llama-hparams.h
+index 4d2cb89..13161df 100644
+--- a/src/llama-hparams.h
++++ b/src/llama-hparams.h
+@@ -71,6 +71,14 @@ struct llama_hparams {
+     uint32_t n_ctx_train; // context size the model was trained on
+     uint32_t n_embd;
+     uint32_t n_layer_all;
++
++    uint32_t loop_start           = 0;
++    uint32_t loop_end             = 0;
++    uint32_t loop_count           = 0;
++    uint32_t physical_layer_count = 0;
++    uint32_t mhc_streams          = 0;
++    uint32_t mhc_iterations       = 0;
++
+     uint32_t n_layer_nextn = 0;
+     uint32_t n_layer_decision = 0; // trailing blocks that form the decision head
+ 
+diff --git a/src/llama-model-saver.cpp b/src/llama-model-saver.cpp
+index 5c2d7a8..99ab9c0 100644
+--- a/src/llama-model-saver.cpp
++++ b/src/llama-model-saver.cpp
+@@ -325,6 +325,15 @@ void llama_model_saver::add_kv_from_model() {
+     } else {
+         add_kv(LLM_KV_ATTENTION_COMPRESS_RATIOS,         hparams.dsv4_compress_ratios, true);
+     }
++    if (model->arch == LLM_ARCH_SENSENOVA_LOOP) {
++        add_kv(LLM_KV_LOOP_START,                   hparams.loop_start);
++        add_kv(LLM_KV_LOOP_END,                     hparams.loop_end);
++        add_kv(LLM_KV_LOOP_COUNT,                   hparams.loop_count);
++        add_kv(LLM_KV_PHYSICAL_LAYER_COUNT,         hparams.physical_layer_count);
++        add_kv(LLM_KV_MHC_STREAMS,                  hparams.mhc_streams);
++        add_kv(LLM_KV_MHC_ITERATIONS,               hparams.mhc_iterations);
++    }
++
+     add_kv(LLM_KV_HYPER_CONNECTION_COUNT,               hparams.dsv4_hc_mult);
+     add_kv(LLM_KV_HYPER_CONNECTION_SINKHORN_ITERATIONS, hparams.dsv4_hc_sinkhorn_iters);
+     add_kv(LLM_KV_HYPER_CONNECTION_EPSILON,             hparams.dsv4_hc_eps);
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 83aed01..87e9533 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -342,6 +342,7 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
+             return new llama_model_pangu_embed(params);
+         case LLM_ARCH_QWEN3NEXT:
+             return new llama_model_qwen3next(params);
++        case LLM_ARCH_SENSENOVA_LOOP:
+         case LLM_ARCH_QWEN35:
+             return new llama_model_qwen35(params);
+         case LLM_ARCH_QWEN35MOE:
+@@ -642,7 +643,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
+     // if a model has fused tensors they need to be separated into "segments", see the comments on ggml_backend_meta_split_state struct
+     auto get_split_segments = [&](int axis, uint32_t il) -> std::vector<std::pair<int64_t, uint32_t>> {
+         // TODO: deduplicate condition [TAG_SPLIT_QGATE_QWEN]
+-        if (ud->model->arch == LLM_ARCH_QWEN3NEXT || ud->model->arch == LLM_ARCH_QWEN35 || ud->model->arch == LLM_ARCH_QWEN35MOE || ud->model->arch == LLM_ARCH_CLEF ||
++        if (ud->model->arch == LLM_ARCH_QWEN3NEXT || ud->model->arch == LLM_ARCH_SENSENOVA_LOOP || ud->model->arch == LLM_ARCH_QWEN35 || ud->model->arch == LLM_ARCH_QWEN35MOE || ud->model->arch == LLM_ARCH_CLEF ||
+                 ud->model->arch == LLM_ARCH_QWEN4EXP) {
+ 
+             // fused full attention layers with Q gate tensors that need n_embd doubled:
+@@ -801,7 +802,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
+                 GGML_ASSERT(segments.size() == 1);
+                 // some models have Q gate tensors, for those cases the granularity needs to be doubled:
+                 // TODO: deduplicate condition [TAG_SPLIT_QGATE_QWEN]
+-                if (ud->model->arch == LLM_ARCH_QWEN3NEXT || ud->model->arch == LLM_ARCH_QWEN35 || ud->model->arch == LLM_ARCH_QWEN35MOE || ud->model->arch == LLM_ARCH_CLEF ||
++                if (ud->model->arch == LLM_ARCH_QWEN3NEXT || ud->model->arch == LLM_ARCH_SENSENOVA_LOOP || ud->model->arch == LLM_ARCH_QWEN35 || ud->model->arch == LLM_ARCH_QWEN35MOE || ud->model->arch == LLM_ARCH_CLEF ||
+                         ud->model->arch == LLM_ARCH_QWEN4EXP) {
+                     return {std::lcm(2*n_embd_q, blck_size_perf)};
+                 }
+@@ -835,7 +836,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
+             if (std::regex_match(tensor_name, pattern_qkv_weight) || std::regex_match(tensor_name, pattern_qkv_bias)) {
+                 // fused full attention layers need Q gate tensors handled like above:
+                 // TODO: deduplicate condition [TAG_SPLIT_QGATE_QWEN]
+-                if (ud->model->arch == LLM_ARCH_QWEN3NEXT || ud->model->arch == LLM_ARCH_QWEN35 || ud->model->arch == LLM_ARCH_QWEN35MOE || ud->model->arch == LLM_ARCH_CLEF ||
++                if (ud->model->arch == LLM_ARCH_QWEN3NEXT || ud->model->arch == LLM_ARCH_SENSENOVA_LOOP || ud->model->arch == LLM_ARCH_QWEN35 || ud->model->arch == LLM_ARCH_QWEN35MOE || ud->model->arch == LLM_ARCH_CLEF ||
+                         ud->model->arch == LLM_ARCH_QWEN4EXP) {
+                     return {std::lcm(2*n_embd_q, blck_size_perf), granularity_kv};
+                 }
+@@ -2155,6 +2156,7 @@ void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
+             case LLM_ARCH_LLAMA:
+             case LLM_ARCH_QWEN3:
+             case LLM_ARCH_QWEN3MOE:
++            case LLM_ARCH_SENSENOVA_LOOP:
+             case LLM_ARCH_QWEN35:
+             case LLM_ARCH_QWEN35MOE:
+             case LLM_ARCH_QWEN3NEXT:
+@@ -2597,6 +2599,7 @@ void llama_model::print_info() const {
+                 arch == LLM_ARCH_PLAMO2 ||
+                 arch == LLM_ARCH_GRANITE_HYBRID ||
+                 arch == LLM_ARCH_QWEN3NEXT ||
++                arch == LLM_ARCH_SENSENOVA_LOOP ||
+                 arch == LLM_ARCH_QWEN35 ||
+                 arch == LLM_ARCH_QWEN35MOE ||
+                 arch == LLM_ARCH_NEMOTRON_H ||
+@@ -3188,7 +3191,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
+                         filter_recr = [&](uint32_t il) {
+                             return hparams.is_recr(il) && hparams.n_ff(il) == 0;
+                         };
+-                    } else if (arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_QWEN4EXP || arch == LLM_ARCH_MINIMAX_01) {
++                    } else if (arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_SENSENOVA_LOOP || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_QWEN4EXP || arch == LLM_ARCH_MINIMAX_01) {
+                         filter_attn = [&](uint32_t il) {
+                             return il < hparams.n_layer() && !hparams.is_recr(il);
+                         };
+@@ -3715,6 +3718,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
+             return LLAMA_ROPE_TYPE_MROPE;
+         case LLM_ARCH_QWEN3VL:
+         case LLM_ARCH_QWEN3VLMOE:
++        case LLM_ARCH_SENSENOVA_LOOP:
+         case LLM_ARCH_QWEN35:
+         case LLM_ARCH_QWEN35MOE:
+         case LLM_ARCH_CLEF:
+diff --git a/src/llama-quant.cpp b/src/llama-quant.cpp
+index 34c2478..58616a2 100644
+--- a/src/llama-quant.cpp
++++ b/src/llama-quant.cpp
+@@ -347,6 +347,9 @@ static bool tensor_allows_quantization(const llama_model_quantize_params * param
+     // do not quantize Mamba/Kimi's small conv1d weights
+     // NOTE: can't use LLM_TN here because the layer number is not known
+     quantize &= name.find("ssm_conv1d") == std::string::npos;
++    if (arch == LLM_ARCH_SENSENOVA_LOOP) {
++        quantize &= name.find(".hc_") == std::string::npos;
++    }
+     quantize &= name.find("shortconv.conv.weight") == std::string::npos;
+ 
+     // do not quantize LFM3-VL's depthwise conv kernels, CONV_2D_DW takes F32 kernels
+diff --git a/src/models/models.h b/src/models/models.h
+index 9a8602b..6726610 100644
+--- a/src/models/models.h
++++ b/src/models/models.h
+@@ -2652,6 +2652,14 @@ struct llama_model_qwen35 : public llama_model_base {
+     struct graph : public llm_build_delta_net_base {
+         graph(const llama_model & model, const llm_graph_params & params);
+     private:
++        struct mhc_state {
++            ggml_tensor * residual;
++            ggml_tensor * post;
++            ggml_tensor * mix;
++        };
++        ggml_tensor * build_mhc_read(ggml_tensor * residual, ggml_tensor * weight, ggml_tensor * bias, mhc_state & state);
++        ggml_tensor * build_mhc_merge(const mhc_state & state, ggml_tensor * branch);
++
+         ggml_tensor * build_layer_attn(
+         llm_graph_input_attn_kv * inp_attn,
+                     ggml_tensor * cur,
+diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
+index 8a4e434..0d4ac1c 100644
+--- a/src/models/qwen35.cpp
++++ b/src/models/qwen35.cpp
+@@ -22,6 +22,23 @@ void llama_model_qwen35::load_arch_hparams(llama_model_loader & ml) {
+         }
+     }
+ 
++    if (arch == LLM_ARCH_SENSENOVA_LOOP) {
++        ml.get_key(LLM_KV_LOOP_START,                   hparams.loop_start);
++        ml.get_key(LLM_KV_LOOP_END,                     hparams.loop_end);
++        ml.get_key(LLM_KV_LOOP_COUNT,                   hparams.loop_count);
++        ml.get_key(LLM_KV_PHYSICAL_LAYER_COUNT,         hparams.physical_layer_count);
++        ml.get_key(LLM_KV_MHC_STREAMS,                  hparams.mhc_streams);
++        ml.get_key(LLM_KV_MHC_ITERATIONS,               hparams.mhc_iterations);
++        const uint32_t layers = hparams.n_layer();
++        if (hparams.mhc_streams != 2 || hparams.loop_start >= hparams.loop_end ||
++            hparams.loop_end > hparams.physical_layer_count || hparams.physical_layer_count > layers ||
++            hparams.loop_count < 1 || hparams.loop_count > layers ||
++            hparams.mhc_iterations < 1 || hparams.mhc_iterations > 100 || hparams.n_layer_nextn != 0 ||
++            uint64_t(hparams.physical_layer_count) + uint64_t(hparams.loop_count - 1)*(hparams.loop_end - hparams.loop_start) != layers) {
++            throw std::runtime_error("invalid SenseNova Loop execution metadata");
++        }
++    }
++
+     switch (hparams.n_layer()) {
+         case 24: type = hparams.n_embd == 1024 ? LLM_TYPE_0_8B : LLM_TYPE_2B; break;
+         case 32: type = hparams.n_embd == 2560 ? LLM_TYPE_4B : LLM_TYPE_9B; break;
+@@ -92,6 +109,13 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
+         layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", il), {n_embd,   n_ff}, flags);
+         layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", il), {  n_ff, n_embd}, flags);
+         layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", il), {n_embd,   n_ff}, flags);
++        if (hparams.mhc_streams > 0 && il >= (int) hparams.loop_start &&
++            il < (int) (hparams.loop_start + (hparams.loop_end - hparams.loop_start) * hparams.loop_count)) {
++            layer.hc_attn_fn = create_tensor(tn(LLM_TENSOR_HC_ATTN_FN, "weight", il), { 2 * n_embd, 8 }, flags);
++            layer.hc_attn_base = create_tensor(tn(LLM_TENSOR_HC_ATTN_BASE, "bias", il), { 8 }, flags);
++            layer.hc_ffn_fn = create_tensor(tn(LLM_TENSOR_HC_FFN_FN, "weight", il), { 2 * n_embd, 8 }, flags);
++            layer.hc_ffn_base = create_tensor(tn(LLM_TENSOR_HC_FFN_BASE, "bias", il), { 8 }, flags);
++        }
+     };
+ 
+     auto load_block_mtp = [&](int il) {
+@@ -158,10 +182,21 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
+     for (int il = 0; il < n_layer; ++il) {
+         res->t_layer_inp[il] = inpL;
+-
++        const auto & layer = model.layers[il];
++        const bool mhc = layer.hc_attn_fn != nullptr;
+         ggml_tensor * inpSA = inpL;
+-
+-        cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
++        mhc_state attn_state{}, ffn_state{};
++        if (mhc) {
++            if ((il - hparams.loop_start) % (hparams.loop_end - hparams.loop_start) == 0) {
++                inpSA = ggml_repeat_4d(ctx0, ggml_reshape_3d(ctx0, inpL, n_embd, 1, n_tokens), n_embd, 2, n_tokens, 1);
++            } else {
++                inpSA = ggml_reshape_3d(ctx0, inpL, n_embd, 2, n_tokens);
++            }
++            cur = build_mhc_read(inpSA, layer.hc_attn_fn, layer.hc_attn_base, attn_state);
++        } else {
++            cur = inpL;
++        }
++        cur = build_norm(cur, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
+         cb(cur, "attn_norm", il);
+ 
+         ggml_build_forward_expand(gf, cur);
+@@ -174,31 +209,39 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+             // Full attention layer
+             cur = build_layer_attn(inp->get_attn(), cur, inp_pos, sections, il);
+         }
+-
+-        if (il == n_layer - 1 && crop_before_nextn(inp_out_ids)) {
+-            cur   = ggml_get_rows(ctx0, cur,   inp_out_ids);
++        if (!mhc && il == n_layer - 1 && crop_before_nextn(inp_out_ids)) {
++            cur = ggml_get_rows(ctx0, cur, inp_out_ids);
+             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
+         }
+-
+-        // Residual connection
+-        cur = ggml_add(ctx0, cur, inpSA);
++        cur = mhc ? build_mhc_merge(attn_state, cur) : ggml_add(ctx0, cur, inpSA);
+         cb(cur, "attn_residual", il);
+ 
+         // Save the tensor before post-attention norm for residual connection
+         ggml_tensor * ffn_residual = cur;
++        if (mhc) {
++            cur = build_mhc_read(cur, layer.hc_ffn_fn, layer.hc_ffn_base, ffn_state);
++        }
+ 
+         // Post-attention norm
+-        ggml_tensor * attn_post_norm = build_norm(cur, model.layers[il].attn_post_norm, nullptr, LLM_NORM_RMS, il);
++        ggml_tensor * attn_post_norm = build_norm(cur, layer.attn_post_norm, nullptr, LLM_NORM_RMS, il);
+         cb(attn_post_norm, "attn_post_norm", il);
+ 
+         // Dense FFN layer - without residual connection
+         cur = build_layer_ffn(attn_post_norm, il);
+         cb(cur, "ffn_out", il);
+-
+-        // Residual connection for FFN - add to the tensor from before post_attention_layernorm
+-        cur = ggml_add(ctx0, cur, ffn_residual);
++        cur = mhc ? build_mhc_merge(ffn_state, cur) : ggml_add(ctx0, cur, ffn_residual);
+         cb(cur, "post_ffn", il);
+-
++        if (mhc) {
++            if ((il + 1 - hparams.loop_start) % (hparams.loop_end - hparams.loop_start) == 0) {
++                cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 1, 0, 2, 3));
++                cur = ggml_reshape_2d(ctx0, ggml_mean(ctx0, cur), n_embd, n_tokens);
++            } else {
++                cur = ggml_reshape_2d(ctx0, cur, 2 * n_embd, n_tokens);
++            }
++        }
++        if (mhc && il == n_layer - 1 && crop_before_nextn(inp_out_ids)) {
++            cur = ggml_get_rows(ctx0, cur, inp_out_ids);
++        }
+         cur = build_cvec(cur, il);
+         cb(cur, "l_out", il);
+ 
+@@ -236,6 +279,42 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+     res->t_logits = cur;
+ }
+ 
++ggml_tensor * llama_model_qwen35::graph::build_mhc_read(
++        ggml_tensor * residual, ggml_tensor * weight, ggml_tensor * bias, mhc_state & state) {
++    const int64_t tokens = residual->ne[2];
++    state.residual = residual;
++    auto * flat = ggml_reshape_2d(ctx0, residual, 2 * n_embd, tokens);
++    auto * norm = ggml_rms_norm(ctx0, flat, 1e-6f);
++    auto * logits = ggml_add(ctx0, build_lora_mm(weight, norm), bias);
++    auto * pre = ggml_sigmoid(ctx0, ggml_cont(ctx0, ggml_view_2d(ctx0, logits, 2, tokens, logits->nb[1], 0)));
++    state.post = ggml_scale(ctx0, ggml_sigmoid(ctx0, ggml_cont(ctx0,
++        ggml_view_2d(ctx0, logits, 2, tokens, logits->nb[1], 2 * logits->nb[0]))), 2.0f);
++    state.post = ggml_reshape_3d(ctx0, state.post, 1, 2, tokens);
++    auto * mix = ggml_cont(ctx0, ggml_view_2d(ctx0, logits, 4, tokens, logits->nb[1], 4 * logits->nb[0]));
++    mix = ggml_soft_max(ctx0, ggml_reshape_3d(ctx0, mix, 2, 2, tokens));
++    for (uint32_t i = 0; i < hparams.mhc_iterations; ++i) {
++        if (i > 0) {
++            mix = ggml_div(ctx0, mix, ggml_sum_rows(ctx0, mix));
++        }
++        mix = ggml_cont(ctx0, ggml_permute(ctx0, mix, 1, 0, 2, 3));
++        mix = ggml_div(ctx0, mix, ggml_sum_rows(ctx0, mix));
++        mix = ggml_cont(ctx0, ggml_permute(ctx0, mix, 1, 0, 2, 3));
++    }
++    state.mix = mix;
++    auto * transposed = ggml_cont(ctx0, ggml_permute(ctx0, residual, 1, 0, 2, 3));
++    auto * branch = ggml_mul_mat(ctx0, ggml_reshape_3d(ctx0, pre, 2, 1, tokens), transposed);
++    return ggml_reshape_2d(ctx0, branch, n_embd, tokens);
++}
++
++ggml_tensor * llama_model_qwen35::graph::build_mhc_merge(const mhc_state & state, ggml_tensor * branch) {
++    const int64_t tokens = state.residual->ne[2];
++    auto * transposed = ggml_cont(ctx0, ggml_permute(ctx0, state.residual, 1, 0, 2, 3));
++    auto * mixed = ggml_mul_mat(ctx0, state.mix, transposed);
++    mixed = ggml_cont(ctx0, ggml_permute(ctx0, mixed, 1, 0, 2, 3));
++    auto * update = ggml_repeat_4d(ctx0, ggml_reshape_3d(ctx0, branch, n_embd, 1, tokens), n_embd, 2, tokens, 1);
++    return ggml_add(ctx0, mixed, ggml_mul(ctx0, update, state.post));
++}
++
+ std::pair<ggml_tensor *, ggml_tensor *> llama_model_qwen35::graph::build_qkvz(
+                 ggml_tensor * input,
+                         int   il) {
+diff --git a/tests/test-llama-archs.cpp b/tests/test-llama-archs.cpp
+index d82d6db..cc8d314 100644
+--- a/tests/test-llama-archs.cpp
++++ b/tests/test-llama-archs.cpp
+@@ -237,7 +237,11 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
+     uint32_t n_head  = 2;
+     uint32_t n_ff    = 384;
+     uint32_t n_layer = 2;
+-    if (arch == LLM_ARCH_LLAMA4) {
++    if (arch == LLM_ARCH_SENSENOVA_LOOP) {
++        n_layer = 12; // four looped layers, two passes, two prefix and suffix layers
++    } else if (arch == LLM_ARCH_QWEN35) {
++        n_layer = 4; // cover both linear and full attention
++    } else if (arch == LLM_ARCH_LLAMA4) {
+         n_layer = 4; // hparams.n_no_rope_layer_step is hard-coded to 4
+     } else if (arch == LLM_ARCH_MAION_CODER) {
+         n_head = 4;
+@@ -692,7 +696,16 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
+     ms.add_kv(LLM_KV_XIELU_ALPHA_P,             1.0f);
+     ms.add_kv(LLM_KV_XIELU_BETA,                1.0f);
+     ms.add_kv(LLM_KV_XIELU_EPS,                 1.0e-7f);
+-    ms.add_kv(LLM_KV_SSM_INNER_SIZE,            arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_QWEN4EXP ? 256 : 2*n_embd);
++    if (arch == LLM_ARCH_SENSENOVA_LOOP) {
++        ms.add_kv(LLM_KV_LOOP_START,           uint32_t(2));
++        ms.add_kv(LLM_KV_LOOP_END,             uint32_t(6));
++        ms.add_kv(LLM_KV_LOOP_COUNT,           uint32_t(2));
++        ms.add_kv(LLM_KV_PHYSICAL_LAYER_COUNT, uint32_t(8));
++        ms.add_kv(LLM_KV_MHC_STREAMS,          uint32_t(2));
++        ms.add_kv(LLM_KV_MHC_ITERATIONS,       uint32_t(20));
++    }
++
++    ms.add_kv(LLM_KV_SSM_INNER_SIZE,            arch == LLM_ARCH_SENSENOVA_LOOP || arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_QWEN4EXP ? 256 : 2*n_embd);
+     ms.add_kv(LLM_KV_SSM_CONV_KERNEL,           uint32_t(4));
+     ms.add_kv(LLM_KV_SSM_STATE_SIZE,            uint32_t(128));
+     ms.add_kv(LLM_KV_SSM_TIME_STEP_RANK,        n_head);
+@@ -788,6 +801,61 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
+     return std::make_pair(std::move(model), std::move(lctx));
+ }
+ 
++static bool check_sensenova_loop_metadata(const size_t seed, const float stdev) {
++    const std::pair<llm_kv, uint32_t> invalid[] = {
++        { LLM_KV_LOOP_START,           6 },
++        { LLM_KV_LOOP_END,             9 },
++        { LLM_KV_LOOP_COUNT,           0 },
++        { LLM_KV_LOOP_COUNT,           1073741826 }, // wraps the old 32-bit layer count to 12
++        { LLM_KV_PHYSICAL_LAYER_COUNT, 13 },
++        { LLM_KV_MHC_STREAMS,          1 },
++        { LLM_KV_MHC_ITERATIONS,       0 },
++        { LLM_KV_MHC_ITERATIONS,       101 },
++    };
++    for (const auto & test : invalid) {
++        auto gguf_ctx = get_gguf_ctx(LLM_ARCH_SENSENOVA_LOOP, false);
++        kv_writer(LLM_ARCH_SENSENOVA_LOOP, gguf_ctx.get()).add_kv(test.first, test.second);
++        try {
++            get_model(gguf_ctx.get(), nullptr, seed, stdev, {});
++        } catch (const std::runtime_error &) {
++            continue;
++        }
++        LOG_ERR("SenseNova Loop accepted invalid metadata: %s=%u\n", llama_arch_kv_name(LLM_ARCH_SENSENOVA_LOOP, test.first).c_str(), test.second);
++        return false;
++    }
++    for (llm_kv key : { LLM_KV_LOOP_START, LLM_KV_LOOP_END, LLM_KV_LOOP_COUNT,
++                       LLM_KV_PHYSICAL_LAYER_COUNT, LLM_KV_MHC_STREAMS, LLM_KV_MHC_ITERATIONS }) {
++        auto gguf_ctx = get_gguf_ctx(LLM_ARCH_SENSENOVA_LOOP, false);
++        gguf_remove_key(gguf_ctx.get(), llama_arch_kv_name(LLM_ARCH_SENSENOVA_LOOP, key).c_str());
++        try {
++            get_model(gguf_ctx.get(), nullptr, seed, stdev, {});
++        } catch (const std::runtime_error &) {
++            continue;
++        }
++        LOG_ERR("SenseNova Loop accepted missing metadata: %s\n", llama_arch_kv_name(LLM_ARCH_SENSENOVA_LOOP, key).c_str());
++        return false;
++    }
++    for (uint32_t start : { 0u, 4u }) {
++        auto gguf_ctx = get_gguf_ctx(LLM_ARCH_SENSENOVA_LOOP, false);
++        kv_writer ms(LLM_ARCH_SENSENOVA_LOOP, gguf_ctx.get());
++        ms.add_kv(LLM_KV_LOOP_START, start);
++        ms.add_kv(LLM_KV_LOOP_END, start + 4);
++        auto model_and_ctx = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, stdev, {});
++        std::vector<llama_token> tokens = { 1, 2, 3, 4 };
++        if (llama_decode(model_and_ctx.second.get(), llama_batch_get_one(tokens.data(), tokens.size())) != 0) {
++            return false;
++        }
++        const float * logits = llama_get_logits_ith(model_and_ctx.second.get(), -1);
++        const int32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model_and_ctx.first.get()));
++        for (int32_t i = 0; i < n_vocab; ++i) {
++            if (!std::isfinite(logits[i])) {
++                return false;
++            }
++        }
++    }
++    return true;
++}
++
+ static std::vector<float> get_logits(
+         llama_model * model, llama_context * lctx, const std::vector<llama_token> & tokens, bool encode = false) {
+     const uint32_t n_vocab  = llama_vocab_n_tokens(llama_model_get_vocab(model));
+@@ -1215,6 +1283,9 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
+     const std::string template_row_res = "%15s %10s|%20s|%15s %10s|\n";
+ 
+     bool all_ok = true;
++    if (arch_matches(arch_filter, LLM_ARCH_SENSENOVA_LOOP)) {
++        all_ok = check_sensenova_loop_metadata(seed, stdev);
++    }
+     size_t n_tests = 0;
+     size_t n_failed = 0;
+     common_log_flush(common_log_main());

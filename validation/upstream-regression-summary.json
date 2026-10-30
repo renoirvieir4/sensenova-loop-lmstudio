@@ -1,0 +1,98 @@
+{
+  "completed_at": "2026-10-30T18:21:23.586890+00:00",
+  "base_revision": "a34de8618b25dfc32ee43749db47d767a9f0a25d",
+  "patch": "patches/upstream/sensenova-loop-upstream.patch",
+  "patch_sha256": "96a3d910ae4d7f6b1f8b02fa930e2ec96df6586d555f85da210b99a83b75fb7f",
+  "applies_cleanly_to_base": true,
+  "full_cpu_build": "passed",
+  "ctest": {
+    "total": 68,
+    "initial_passed": 67,
+    "initial_failed": 1,
+    "failure_cause": "Tokenizer test cloned Git LFS pointer files because git-lfs is not installed. Downloaded the 11 actual vocabulary files and verified each against its pointer SHA256.",
+    "failed_test_retest": "passed",
+    "all_68_tests_passed_across_initial_run_and_retest": true,
+    "logs": [
+      "ctest.log",
+      "ctest-tokenizers-retest.log"
+    ]
+  },
+  "before_after_regression": {
+    "fixtures": [
+      "lfm3-dense",
+      "llama-dense",
+      "llama-moe",
+      "qwen35-dense",
+      "qwen35moe-moe",
+      "qwen3next-moe"
+    ],
+    "synthetic_weights": true,
+    "cases": 48,
+    "logits_compared": 55296,
+    "all_bitwise_identical": true,
+    "prompt_lengths": [
+      1,
+      4,
+      32,
+      64
+    ],
+    "decode_steps_per_case": 9,
+    "kv_cache_types": [
+      "f16",
+      "q8_0"
+    ],
+    "details": "other-model-regression.json"
+  },
+  "architecture_tests": {
+    "architectures": [
+      "sensenova_loop",
+      "qwen35"
+    ],
+    "inference": "passed",
+    "save_reload": "passed",
+    "mixed_batch": "passed",
+    "invalid_metadata_cases": 8,
+    "missing_metadata_cases": 6,
+    "loop_boundary_cases": 2,
+    "log": "architecture-tests-final.log"
+  },
+  "sensenova_checkpoint_reference_checks": [
+    "validation-q8-cpu.json",
+    "validation-q8-kv.json"
+  ],
+  "fixes_in_candidate": [
+    "Preserve mandatory SenseNova loop and mHC metadata when saving models.",
+    "Validate loop metadata and use 64-bit expanded-layer-count arithmetic to reject overflow.",
+    "Crop final-layer outputs after merging mHC streams when the loop reaches the final layer."
+  ],
+  "checks": {
+    "git_diff_check": "passed",
+    "editorconfig": "passed",
+    "python_types": "passed",
+    "model_factory_code_style": "passed",
+    "source_checkpoint_converter_dry_run": "passed"
+  },
+  "performance_smoke": {
+    "fixture": "qwen35-dense",
+    "synthetic_weights": true,
+    "order": [
+      "baseline",
+      "patched",
+      "patched",
+      "baseline"
+    ],
+    "repeats_per_run": 7,
+    "prompt_tokens": 512,
+    "generation_tokens": 128,
+    "threads": 4,
+    "interpretation": "No clear slowdown outside measured run variation; small-fixture smoke test only."
+  },
+  "limitations": [
+    "CPU-only regression validation of this upstream candidate; CUDA, Metal and Vulkan not tested.",
+    "Other-architecture before/after comparisons use small synthetic fixtures, not full production checkpoints.",
+    "No full-model perplexity benchmark or full cross-platform CI matrix completed."
+  ],
+  "installed_lm_studio_runtime_modified": false,
+  "github_submitted": false,
+  "note": "CPU validation for the separate upstream candidate, not the older LM Studio recipe. Raw local logs are not included in this repository."
+}
