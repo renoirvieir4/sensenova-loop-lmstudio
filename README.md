@@ -6,6 +6,39 @@ A source-based recipe for running **SenseNova-Loop-9B-Preview text chat natively
 
 The original model and architecture are by [SenseNova / OpenSenseNova](https://github.com/OpenSenseNova/SenseNova-Loop). The [Q8_0 GGUF](https://huggingface.co/notfakerv/SenseNova-Loop-9B-Preview-GGUF) was converted and validated by notfakerv with OpenAI Codex assistance. No fine-tuning was performed.
 
+## About the original model
+
+SenseNova describes Loop 9B Preview as a multimodal model for long-context work and tasks involving tools, including document understanding and coding. The original checkpoint accepts text and images and produces text. Its decoder reuses a 24-layer block twice: 32 distinct layers perform 56 layer executions per forward pass. Learned two-stream mHC routing manages residual information within the repeated block. The attention pattern alternates three linear-attention layers with one full-attention layer. [Official model card, pinned revision](https://huggingface.co/sensenova/SenseNova-Loop-9B-Preview/blob/27abea779b1e6634b136805b6519371739d551f7/README.md).
+
+| Original model specification | Model-card value |
+| --- | --- |
+| Backbone / inference scale, as reported by the authors | Approximately 9B / 14.6B parameters |
+| Physical layers / executions | 32 / 56 |
+| Repeated block | Layers 4-27, two passes with shared weights |
+| Residual streams / Sinkhorn iterations | 2 / 20 |
+| Maximum training sequence length | 262,144 tokens |
+| Original export precision | BF16 backbone, FP32 mHC routers |
+| License | Apache-2.0 |
+
+The repeated execution does not add new learned weights to the original checkpoint. This GGUF stores duplicate entries for repeated layers to provide separate cache state. Its supported features and tested context are narrower than the original model's: see [What works](#what-works).
+
+## Published benchmarks
+
+These scores are **reported by SenseNova for the original model**, transcribed from the [official benchmark chart](https://huggingface.co/sensenova/SenseNova-Loop-9B-Preview/resolve/27abea779b1e6634b136805b6519371739d551f7/assets/loop9b-benchmark-results.png). They were **not measured on this Q8_0 GGUF or in LM Studio**. Scores retain the chart's units and two-decimal formatting; the card does not fully document the evaluation setup.
+
+| Benchmark | SenseNova-Loop-9B-Preview |
+| --- | ---: |
+| BIRD-Dev | 71.38 |
+| WorkBuddy Bench | 66.89 |
+| AIDABench | 58.87 |
+| TeamBench | 48.89 |
+| Terminal Bench 2.1 | 40.45 |
+| T³-Banking | 18.56 |
+| AutomationBench | 13.72 |
+| RaccoonPPTBench | 70.70 |
+
+See [the complete comparison table and original figure](BENCHMARKS.md), including the six comparison models. Our own tests are recorded separately under [validation](validation/) and do not reproduce these benchmarks.
+
 ## What works
 
 - Native text generation and conversation history in LM Studio.
